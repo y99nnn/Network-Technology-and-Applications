@@ -1,0 +1,249 @@
+#include "pcap.h"
+#include<iomanip>//setw、setfill
+#include<string>
+#include<iostream>
+#include <Winsock2.h>//inet_ntop
+#include <windows.h>
+#include <iphlpapi.h>
+#pragma comment(lib,"ws2_32.lib")
+#pragma comment(lib,"wpcap.lib")
+#pragma pack(1)//以1byte方式对齐
+#pragma warning(disable:4996)
+using namespace std;
+
+DWORD MyIP, getIP;
+BYTE MyMAC[6] = { 0 };
+
+#pragma pack(1)		//进入字节对齐方式
+struct FrameHeader_t {//帧首部
+    BYTE DesMAC[6];//目的地址
+    BYTE SrcMAC[6];//源地址
+    WORD FrameType;//帧类型
+};
+
+struct ARPFrame_t {//ARP帧
+    FrameHeader_t FrameHeader;//以太网数据帧
+    WORD HardwareType;//硬件类型
+    WORD ProtocolType;//协议类型
+    BYTE HLen;//硬件地址长度
+    BYTE PLen;//协议地址长度
+    WORD Operation;//操作类型
+    BYTE SendHa[6];//发送方MAC地址
+    DWORD SendIP;//发送方IP地址
+    BYTE RecvHa[6];//接收方MAC地址
+    DWORD RecvIP;//接收方IP地址
+};
+#pragma pack()	//恢复缺省对齐方式
+
+void Mac_Output(const u_char* MACaddr) {
+    for (int i = 0; i < 6; i++) {
+        cout << setw(2) << setfill('0') << hex << (int)MACaddr[i];
+        if (i != 5)
+            cout << " - ";
+        else
+            cout << endl;
+    }
+}
+int IP_Output(DWORD IPaddr) {
+    BYTE* p = (BYTE*)&IPaddr;
+    int i = 0;
+    while (i <= 3) {
+        cout << dec << (int)*p;
+        if (i != 3)
+            cout << " - ";
+        else
+            cout << endl;
+        p++;
+        i++;
+    }
+    return i;
+}
+void ARP_Output(const ARPFrame_t* arpFrame) {
+    //cout << "*********************************ARP_Output******************************" << endl;
+    cout << "帧头部：" << endl;
+    cout << "  目的MAC地址: ";
+    Mac_Output(arpFrame->FrameHeader.DesMAC);
+    cout << "  源MAC地址: ";
+    Mac_Output(arpFrame->FrameHeader.SrcMAC);
+    cout << "  帧类型: 0x" << hex << ntohs(arpFrame->FrameHeader.FrameType) << dec << endl;
+
+    cout << "ARP头部：" << endl;
+    cout << "  硬件类型: 0x" << hex << ntohs(arpFrame->HardwareType) << dec << endl;
+    cout << "  协议类型: 0x" << hex << ntohs(arpFrame->ProtocolType) << dec << endl;
+    cout << "  硬件地址长度: " << static_cast<int>(arpFrame->HLen) << endl;
+    cout << "  协议地址长度: " << static_cast<int>(arpFrame->PLen) << endl;
+    cout << "  操作类型: 0x" << hex << ntohs(arpFrame->Operation) << dec << endl;
+    cout << "  发送者MAC地址: ";
+    Mac_Output(arpFrame->SendHa);
+    cout << "  发送者IP地址: ";
+    IP_Output(ntohl(arpFrame->SendIP));
+    cout << "  目标MAC地址: ";
+    Mac_Output(arpFrame->RecvHa);
+    cout << "  目标IP地址: ";
+    IP_Output(ntohl(arpFrame->RecvIP));
+}
+void PackARP(ARPFrame_t* arpFrame) {
+    // 设置帧首部的目的MAC地址为广播地址
+    for (int i = 0; i < 6; i++) {
+        arpFrame->FrameHeader.DesMAC[i] = 0xff; // 表示广播
+    }
+
+    // 暂时使用虚假的MAC地址，稍后更改
+    for (int i = 0; i < 6; i++) {
+        arpFrame->SendHa[i] = arpFrame->FrameHeader.SrcMAC[i] = 0x0f;
+    }
+
+    arpFrame->FrameHeader.FrameType = htons(0x0806);  // 帧类型为ARP
+    arpFrame->HardwareType = htons(0x0001);           // 硬件类型为以太网
+    arpFrame->ProtocolType = htons(0x0800);           // 协议类型为IP
+    arpFrame->HLen = 6;                               // 硬件地址长度为6
+    arpFrame->PLen = 4;                               // 协议地址长度为4
+    arpFrame->Operation = htons(0x0001);              // 操作为ARP请求
+    arpFrame->SendIP = arpFrame->RecvIP = htonl(0x00000000);  // 暂时伪造发送和接收方的IP地址
+
+    for (int i = 0; i < 6; i++) {
+        arpFrame->RecvHa[i] = 0;  // 表示目的地址未知
+    }
+}
+BYTE* getMYMAC(pcap_t* open_dev, ARPFrame_t newARP) {
+    getIP = newARP.RecvIP = MyIP;
+    // 发送 ARP 请求
+    if (pcap_sendpacket(open_dev, (u_char*)&newARP, sizeof(ARPFrame_t)));
+    cout << "=====================获取本机MAC：主机发送的ARP数据包===================" << endl;
+    ARP_Output(&newARP);
+    // 接收并处理 ARP 响应
+    bool foundMapping = false;
+    ARPFrame_t* recvARP = nullptr;
+    struct pcap_pkthdr* recvpkt_header;
+    const u_char* recvpkt_data = NULL;
+    while (!foundMapping) {
+        int result = pcap_next_ex(open_dev, &recvpkt_header, &recvpkt_data);
+        if (recvpkt_data != NULL) {
+            recvARP = (ARPFrame_t*)recvpkt_data;
+            if (MyIP == recvARP->SendIP) {
+                cout << "--------------------获取本机MAC：主机接受到的ARP数据包--------------------" << endl;
+                ARP_Output(recvARP);
+                cout << "--------------------获取本机MAC：主机IP与MAC映射--------------------" << endl;
+                    
+                cout << "主机IP：" << endl;
+                IP_Output(recvARP->SendIP);
+                cout << "主机MAC：";
+                Mac_Output(recvARP->SendHa);
+                cout << endl;
+                foundMapping = true;
+            }
+        }
+
+    }
+    return recvARP->SendHa;
+}
+
+
+int main() {
+    pcap_if_t* alldevs;
+    pcap_if_t* user_dev;
+    pcap_addr_t* a;
+    char errbuf[PCAP_ERRBUF_SIZE];
+
+    // 获取所有网络接口信息
+    if (pcap_findalldevs_ex(PCAP_SRC_IF_STRING, NULL, &alldevs, errbuf) == -1) {
+        cout << "pcap_findalldevs_ex()调用错误！" << endl;
+        cout << "错误详情：" << errbuf << endl;
+        pcap_freealldevs(alldevs);
+        return 0;
+    }
+
+    int count = 0;
+    // 遍历每个网络接口
+    for (user_dev = alldevs; user_dev != NULL; user_dev = user_dev->next) {
+        count++;
+        cout << "网卡 " << count << ": ";
+        cout << user_dev->name << " \t描述信息: " << user_dev->description << endl;
+
+        // 遍历每个网络接口的地址信息
+        for (a = user_dev->addresses; a != NULL; a = a->next) {
+            if (a->addr->sa_family == AF_INET)
+            {
+                cout << "  IP地址：\t\t" << inet_ntoa(((struct sockaddr_in*)(a->addr))->sin_addr) << endl;
+                cout << "  网络掩码：\t\t" << inet_ntoa(((struct sockaddr_in*)(a->netmask))->sin_addr) << endl;
+                cout << "  广播地址：\t\t" << inet_ntoa(((struct sockaddr_in*)(a->broadaddr))->sin_addr) << endl;
+            }
+        }
+    }
+    if (count == 0) {
+        cout << "无可用网卡！" << endl;
+        return -1;
+    }
+
+    int user_dev_number ;
+    cout << "请在网卡 (1-" << count << ")中输入选择打开的网卡:";
+    cin >> user_dev_number;
+
+    if (user_dev_number < 1 || user_dev_number > count) {
+        cout << "网卡选择错误！";
+        pcap_freealldevs(alldevs);
+        return -1;
+    }
+    
+    user_dev = alldevs;
+    int i = 0;
+    while (i != user_dev_number - 1) {
+        user_dev = user_dev->next;
+        i++;
+    }
+
+    pcap_t* open_dev;
+    if ((open_dev = pcap_open(user_dev->name, 65536, PCAP_OPENFLAG_PROMISCUOUS, 10000, NULL, errbuf)) == NULL) {
+        cout << "打开网卡失败！" << endl;
+        cout << "错误详情：" << errbuf << endl;
+        pcap_freealldevs(alldevs);
+        return 0;
+    }
+
+    MyIP = inet_addr(inet_ntoa(((struct sockaddr_in*)(user_dev->addresses->addr))->sin_addr));
+
+    ARPFrame_t newARP = ARPFrame_t();
+    PackARP(&newARP);
+    //ARP_Output(&newARP);
+
+
+    BYTE* myMac = getMYMAC(open_dev, newARP);
+    memcpy(&newARP.SendHa, myMac, 6);
+    memcpy(&newARP.FrameHeader.SrcMAC, myMac, 6);
+    //ARP_Output(&newARP);
+    newARP.SendIP = MyIP;
+
+    struct pcap_pkthdr* recvpkt_header;
+    const u_char* recvpkt_data = NULL;
+    int result;
+    ARPFrame_t* recvARP = NULL;
+    recvARP = (ARPFrame_t*)recvpkt_data;
+    //输入IP地址然后找到并输出对应MAC地址
+    cout << endl;
+    char getwhoip[16];
+    cout << "=====================请输入目的IP地址===================" << endl;
+    cin >> getwhoip;
+    getIP = newARP.RecvIP = inet_addr(getwhoip);
+    //ARP_Output(&newARP);
+    cout << "=====================获取目标IP的MAC：主机发送的ARP数据包===================" << endl;
+    pcap_sendpacket(open_dev, (u_char*)&newARP, sizeof(ARPFrame_t));
+    ARP_Output(&newARP);
+    bool foundMapping = false;
+    while (!foundMapping) {
+        int result = pcap_next_ex(open_dev, &recvpkt_header, &recvpkt_data);
+        recvARP = (ARPFrame_t*)recvpkt_data;
+        //if (MyIP == recvARP->RecvIP && getIP == recvARP->SendIP) 
+        if (getIP == recvARP->SendIP) {
+            cout << "=====================获取目标IP的MAC：接收到的ARP数据包===================" << endl;
+            ARP_Output(recvARP);
+            cout << "--------------------获取目标IP的MAC：目的IP与Mac映射关系--------------------" << endl;
+            cout <<  "目的IP：";
+            IP_Output(recvARP->SendIP);
+            cout << "目的MAC：";
+            Mac_Output(recvARP->SendHa);
+            cout << endl;
+            foundMapping = true;
+        }
+    }
+
+}
